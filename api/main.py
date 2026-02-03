@@ -5,7 +5,7 @@ import pytesseract
 import psutil
 
 from receipt_parser import parse_receipt
-from utils import resize_image, save_log
+from utils import resize_image, preprocess_for_ocr, save_log
 
 app = Flask(__name__)
 
@@ -26,11 +26,19 @@ def ocr():
     file = request.files["file"]
     img = Image.open(file.stream)
 
-    # 画像縮小（最重要）
+    # 画像リサイズ
     img = resize_image(img)
+    
+    # 画像前処理（コントラスト強調、二値化など）
+    img = preprocess_for_ocr(img)
 
-    # OCR
-    text = pytesseract.image_to_string(img, lang="jpn+eng")
+    # OCR設定
+    # PSM 6: 単一の均一なテキストブロックを想定
+    # OEM 3: デフォルトのLSTMエンジン
+    custom_config = r'--psm 6 --oem 3'
+    
+    # OCR実行
+    text = pytesseract.image_to_string(img, lang="jpn+eng", config=custom_config)
 
     # パース
     parsed = parse_receipt(text)
