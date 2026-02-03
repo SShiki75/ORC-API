@@ -2,17 +2,29 @@ import re
 
 def preprocess_text(text):
     """OCRテキストの前処理：よくある誤認識を修正"""
+    # Y\ → ¥ (OCRがYとバックスラッシュを認識)
+    text = re.sub(r'Y\\', '¥', text)
+    # ¥~ → ¥ (チルダが混入)
+    text = re.sub(r'¥~', '¥', text)
+    # \数字 → ¥数字
+    text = re.sub(r'\\(\d)', r'¥\1', text)
     # 価格の誤認識を修正
     text = re.sub(r'¥S', '¥5', text)  # S→5
     text = re.sub(r'¥O', '¥0', text)  # O→0
-    text = re.sub(r'\\(\d)', r'¥\1', text)  # \108 → ¥108
-    text = re.sub(r'(\d+)\s*軽', r'\1', text)  # 108軽 → 108
-    text = re.sub(r'(\d+)\)', r'\1', text)  # 355) → 355
-    text = re.sub(r'\(\s*(\d+)', r'\1', text)  # (26 → 26
+    # 価格後のゴミ文字を除去: ¥168HE → ¥168、¥247軽 → ¥247
+    text = re.sub(r'(¥\d+)[A-Za-z軽]+', r'\1', text)
+    # 108軽 → 108（¥なしの場合）
+    text = re.sub(r'(\d+)\s*軽', r'\1', text)
+    # 355) → 355
+    text = re.sub(r'(\d+)\)', r'\1', text)
+    # (26 → 26
+    text = re.sub(r'\(\s*(\d+)', r'\1', text)
     # カンマ+スペースの修正: ¥4, 902 → ¥4,902
     text = re.sub(r'([¥￥\\]?\d+),\s+(\d+)', r'\1,\2', text)
     # ¥と数字の間のスペース除去: ¥ 4902 → ¥4902
     text = re.sub(r'([¥￥\\])\s+(\d)', r'\1\2', text)
+    # MM, HE などの価格直後のゴミを除去
+    text = re.sub(r'(¥\d{2,5})\s*[A-Z]{2,}', r'\1', text)
     return text
 
 def is_garbage_line(line):
