@@ -9,6 +9,10 @@ def preprocess_text(text):
     text = re.sub(r'(\d+)\s*軽', r'\1', text)  # 108軽 → 108
     text = re.sub(r'(\d+)\)', r'\1', text)  # 355) → 355
     text = re.sub(r'\(\s*(\d+)', r'\1', text)  # (26 → 26
+    # カンマ+スペースの修正: ¥4, 902 → ¥4,902
+    text = re.sub(r'([¥￥\\]?\d+),\s+(\d+)', r'\1,\2', text)
+    # ¥と数字の間のスペース除去: ¥ 4902 → ¥4902
+    text = re.sub(r'([¥￥\\])\s+(\d)', r'\1\2', text)
     return text
 
 def is_garbage_line(line):
@@ -52,8 +56,9 @@ def parse_receipt(text):
     total_amount = 0
 
     price_pattern = re.compile(r"(\d{1,3}(?:,\d{3})*)")
+    # ◎○●などの軽減税率マークも含めて認識
     item_line_pattern = re.compile(
-        r"([ぁ-んァ-ン一-龥A-Za-z0-9ー・\-\s]+?)\s+[¥\\￥]?(\d{1,3}(?:,\d{3})*)"
+        r"[◎○●※]?([ぁ-んァ-ン一-龥A-Za-z0-9ー・\-\s０-９]+?)\s+[¥\\￥]?(\d{1,3}(?:,\d{3})*)"
     )
 
     # ゴミ行を除外
@@ -100,7 +105,8 @@ def parse_receipt(text):
     noise_keywords = [
         "対象", "消費税", "支払", "残高", "クーポン", "ファミマ", "アプリ",
         "電話", "登録番号", "レジ", "責No", "円引き", "カード番号",
-        "マネー", "通系", "FamilyMart", "sana", "2024年", "2025年", "2026年"
+        "マネー", "通系", "FamilyMart", "sana", "2024年", "2025年", "2026年",
+        "合計", "合　計", "小計"
     ]
 
     for line in target_lines:
