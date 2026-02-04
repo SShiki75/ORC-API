@@ -1,59 +1,62 @@
-from PIL import Image, ImageFilter, ImageOps, ImageEnhance
+import cv2
+import numpy as np
+from PIL import Image
 
-def resize_image(img, max_size=1500):
-    """画像をリサイズ（OCR精度のため少し大きめに）"""
-    img.thumbnail((max_size, max_size))
-    return img
-
-def preprocess_for_ocr(img):
+def preprocess_image(image: Image.Image) -> Image.Image:
     """
-    レシート画像のOCR前処理
-    - グレースケール化
-    - コントラスト強調
-    - シャープ化
+    レシート画像を前処理してOCR精度を向上させる
+    
+    処理内容:
+    1. グレースケール化
+    2. ノイズ除去
+    3. 適応的二値化
+    4. コントラスト強調
     """
-    # RGBに変換（透明度チャンネルがある場合の対策）
-    if img.mode != 'RGB':
-        img = img.convert('RGB')
+    # PIL ImageをOpenCV形式に変換
+    img_array = np.array(image)
+    
+    # RGBからBGRに変換（OpenCVはBGR形式）
+    if len(img_array.shape) == 3 and img_array.shape[2] == 3:
+        img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
     
     # グレースケール化
-    img = ImageOps.grayscale(img)
+    if len(img_array.shape) == 3:
+        gray = cv2.cvtColor(img_array, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img_array
     
-    # コントラスト強調（適度に）
-    enhancer = ImageEnhance.Contrast(img)
-    img = enhancer.enhance(1.5)
+    # ノイズ除去（ガウシアンブラー）
+    denoised = cv2.GaussianBlur(gray, (3, 3), 0)
     
-    # 明るさ調整（レシートを明るく）
-    brightness = ImageEnhance.Brightness(img)
-    img = brightness.enhance(1.1)
+    # 適応的二値化（レシートの照明ムラに対応）
+    binary = cv2.adaptiveThreshold(
+        denoised,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        11,
+        2
+    )
     
-    # シャープ化
-    img = img.filter(ImageFilter.SHARPEN)
+    # コントラスト強調（CLAHE）
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(binary)
     
-    # ノイズ除去（軽めのぼかし後にシャープ化）
-    img = img.filter(ImageFilter.MedianFilter(size=3))
-    img = img.filter(ImageFilter.SHARPEN)
+    # PIL Imageに戻す
+    result = Image.fromarray(enhanced)
     
-    return img
+    return result
 
-def save_log(entry, path="logs.txt"):
-    """OCRログを保存（直近2件のみ）"""
-    import datetime
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    formatted_entry = f"--- {timestamp} ---\n{entry}\n"
+
+def resize_image(image: Image.Image, max_width: int = 1500) -> Image.Image:
+    """
+    画像を適切なサイズにリサイズ（OCR精度向上のため）
+    """
+    width, height = image.size
     
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            content = f.read()
-    except:
-        content = ""
+    if width > max_width:
+        ratio = max_width / width
+        new_height = int(height * ratio)
+        image = image.resize((max_width, new_height), Image.Resampling.LANCZOS)
     
-    # 区切り文字で分割して直近2件を保持
-    entries = content.split("--- ")
-    entries = [e for e in entries if e.strip()]
-    entries.append(f"{timestamp} ---\n{entry}\n")
-    entries = entries[-2:]  # 直近2件だけ
-    
-    with open(path, "w", encoding="utf-8") as f:
-        for e in entries:
-            f.write("--- " + e)
+    return image

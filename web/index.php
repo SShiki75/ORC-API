@@ -1,153 +1,175 @@
 <?php
-session_start();
+/**
+ * ファミリーマート レシートOCRシステム
+ * 
+ * 機能:
+ * - 画像アップロード → Render APIでOCR処理
+ * - 商品名・価格・合計を画面表示
+ * - CSV出力・ダウンロード
+ * - OCRログ表示・ダウンロード
+ */
 
-// 設定
-// 後でデプロイした Render アプリの URL に変更してください
-$api_url = 'https://receipt-ocr-api-1.onrender.com';
-$log_file = 'ocr.log';
+// エラー表示設定（デバッグ用）
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
 
-// Clear old session data on fresh page load to ensure state is transient
-if ($_SERVER['REQUEST_METHOD'] === 'GET' && (!isset($_GET['action']) || $_GET['action'] !== 'download')) {
-    unset($_SESSION['last_result']);
-}
+// API設定
+define('API_URL', 'https://ocr-api-wh2v.onrender.com');
 
+// CSV保存先
+define('CSV_FILE', 'result.csv');
+
+// 変数初期化
 $result = null;
 $error = null;
+$csv_download_url = null;
 
-// CSV ダウンロードの処理
-if (isset($_GET['action']) && $_GET['action'] === 'download' && isset($_SESSION['last_result'])) {
-    $data = $_SESSION['last_result'];
-
-    header('Content-Type: text/csv');
-    header('Content-Disposition: attachment; filename="receipt_' . date('YmdHis') . '.csv"');
-
-    $output = fopen('php://output', 'w');
-
-    // Excel 互換性のために BOM を追加
-    fputs($output, "\xEF\xBB\xBF");
-
-    fputcsv($output, ['商品名', '価格']);
-
-    if (isset($data['parsed_data']['items'])) {
-        foreach ($data['parsed_data']['items'] as $item) {
-            fputcsv($output, [$item['name'], $item['price']]);
-        }
-    }
-
-    // 合計行を追加
-    if (isset($data['parsed_data']['total'])) {
-        fputcsv($output, ['', '']);
-        fputcsv($output, ['合計', $data['parsed_data']['total']]);
-    }
-
-    fclose($output);
-    exit;
-}
-
-// ファイルアップロードの処理
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['receipt_image'])) {
-    if ($_FILES['receipt_image']['error'] === UPLOAD_ERR_OK) {
+// POSTリクエスト処理
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    
+    // 画像アップロード処理
+    if (isset($_FILES['receipt_image']) && $_FILES['receipt_image']['error'] === UPLOAD_ERR_OK) {
+        
         $tmp_name = $_FILES['receipt_image']['tmp_name'];
         $file_name = $_FILES['receipt_image']['name'];
-        $cfile = new CURLFile($tmp_name, $_FILES['receipt_image']['type'], $file_name);
-
+        
+        // APIにファイルを送信
         $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $api_url);
-        curl_setopt($ch, CURLOPT_POST, 1);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, ['image' => $cfile]);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        // ローカル環境や適切な証明書がない無料ホスティングでのテスト用に SSL 検証を無効化する必要がある場合があります
-        // curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); 
-
+        $cfile = new CURLFile($tmp_name, $_FILES['receipt_image']['type'], $file_name);
+        
+        curl_setopt_array($ch, [
+            CURLOPT_URL => API_URL . '/scan',
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => ['file' => $cfile],
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 30,
+        ]);
+        
         $response = curl_exec($ch);
         $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-
+        
         if (curl_errno($ch)) {
-            $error = 'Curl エラー: ' . curl_error($ch);
+            $error = 'API接続エラー: ' . curl_error($ch);
         } elseif ($http_code !== 200) {
-            $error = 'API エラー: ' . $response;
+            $error = "APIエラー (HTTP $http_code): " . $response;
         } else {
-            $data = json_decode($response, true);
-            if ($data) {
-                $result = $data;
-                $_SESSION['last_result'] = $data;
-
-                // 生テキストのログ記録 (直近2件のみ保持)
-                if (isset($data['raw_text'])) {
-                    $current_log = file_exists($log_file) ? file_get_contents($log_file) : '';
-                    $new_entry = "--- " . date('Y-m-d H:i:s') . " ---\n" . $data['raw_text'] . "\n\n";
-
-                    // 区切り文字で分割
-                    $pattern = '/(--- \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} ---)/';
-                    $parts = preg_split($pattern, $current_log . $new_entry, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY);
-
-                    // 直近2件（ヘッダー+本文で1件なので、最大4要素）を保持
-                    $keep_parts = array_slice($parts, -4);
-                    $new_log_content = implode('', $keep_parts);
-
-                    file_put_contents($log_file, $new_log_content);
-                }
-            } else {
-                $error = 'API から無効な JSON レスポンスが返されました';
+            $result = json_decode($response, true);
+            
+            // CSV生成
+            if ($result && isset($result['items'])) {
+                generate_csv($result);
+                $csv_download_url = CSV_FILE;
             }
         }
+        
         curl_close($ch);
     } else {
-        $error = 'アップロードエラー (コード: ' . $_FILES['receipt_image']['error'] . ')';
+        $error = '画像ファイルを選択してください';
     }
 }
+
+/**
+ * CSV生成
+ */
+function generate_csv($data) {
+    $fp = fopen(CSV_FILE, 'w');
+    
+    // BOM追加（Excel対応）
+    fprintf($fp, chr(0xEF).chr(0xBB).chr(0xBF));
+    
+    // ヘッダー
+    fputcsv($fp, ['商品名', '価格']);
+    
+    // 商品データ
+    foreach ($data['items'] as $item) {
+        fputcsv($fp, [$item['name'], $item['price']]);
+    }
+    
+    // 合計
+    if (isset($data['total']) && $data['total']) {
+        fputcsv($fp, ['合計', $data['total']]);
+    }
+    
+    fclose($fp);
+}
+
+/**
+ * OCRログ取得
+ */
+function get_ocr_logs() {
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL => API_URL . '/logs/ocr',
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 10,
+    ]);
+    
+    $response = curl_exec($ch);
+    curl_close($ch);
+    
+    return $response ?: 'ログが取得できませんでした';
+}
+
+// ログ表示リクエスト
+$show_logs = isset($_GET['show_logs']);
+$logs = $show_logs ? get_ocr_logs() : null;
+
 ?>
 <!DOCTYPE html>
 <html lang="ja">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Easy Receipt OCR</title>
+    <title>ファミマレシートOCR</title>
     <link rel="stylesheet" href="style.css">
-    <link
-        href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&family=Outfit:wght@400;700&display=swap"
-        rel="stylesheet">
 </head>
-
 <body>
     <div class="container">
         <header>
-            <h1>Receipt OCR</h1>
-            <p>簡単・無料・登録不要のレシート読み取り</p>
+            <h1>🧾 ファミリーマート レシートOCR</h1>
+            <p>レシート画像をアップロードして商品情報を抽出</p>
         </header>
 
+        <!-- 画像アップロードフォーム -->
         <section class="upload-section">
-            <form action="" method="post" enctype="multipart/form-data" id="uploadForm">
-                <label for="fileInput" class="upload-label">
-                    <span class="icon">📷</span>
-                    <span class="text">レシートを撮影 / 選択</span>
-                </label>
-                <input type="file" name="receipt_image" id="fileInput" accept="image/*" capture="environment" hidden
-                    onchange="document.getElementById('uploadForm').submit(); document.getElementById('loading').style.display='block';">
+            <form method="POST" enctype="multipart/form-data" id="uploadForm">
+                <div class="file-input-wrapper">
+                    <label for="receipt_image" class="file-label">
+                        📷 レシート画像を選択
+                    </label>
+                    <input 
+                        type="file" 
+                        name="receipt_image" 
+                        id="receipt_image" 
+                        accept="image/*"
+                        required
+                    >
+                    <span id="fileName" class="file-name">ファイル未選択</span>
+                </div>
+                <button type="submit" class="btn btn-primary">🔍 OCR実行</button>
             </form>
-            <div id="loading" style="display:none; margin-top: 20px;">
-                <div class="spinner"></div>
-                <p>解析中...</p>
-            </div>
         </section>
 
+        <!-- エラー表示 -->
         <?php if ($error): ?>
-            <div class="alert error">
-                <?= htmlspecialchars($error) ?>
+            <div class="alert alert-error">
+                ❌ <?= htmlspecialchars($error) ?>
             </div>
         <?php endif; ?>
 
-        <?php if ($result): ?>
+        <!-- OCR結果表示 -->
+        <?php if ($result && isset($result['success']) && $result['success']): ?>
             <section class="result-section">
-                <h2>解析結果</h2>
-
-                <div class="total-display">
-                    <span class="label">合計金額</span>
-                    <span class="amount">¥<?= number_format($result['parsed_data']['total'] ?? 0) ?></span>
+                <h2>📊 抽出結果</h2>
+                
+                <!-- フォーマット済み出力 -->
+                <div class="formatted-output">
+                    <strong>抽出データ:</strong>
+                    <p class="result-text"><?= htmlspecialchars($result['formatted']) ?></p>
                 </div>
 
-                <div class="table-wrapper">
+                <!-- 商品リスト -->
+                <div class="items-table">
                     <table>
                         <thead>
                             <tr>
@@ -156,34 +178,78 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['receipt_image'])) {
                             </tr>
                         </thead>
                         <tbody>
-                            <?php if (isset($result['parsed_data']['items']) && count($result['parsed_data']['items']) > 0): ?>
-                                <?php foreach ($result['parsed_data']['items'] as $item): ?>
-                                    <tr>
-                                        <td><?= htmlspecialchars($item['name']) ?></td>
-                                        <td>¥<?= number_format($item['price']) ?></td>
-                                    </tr>
-                                <?php endforeach; ?>
-                            <?php else: ?>
+                            <?php foreach ($result['items'] as $item): ?>
                                 <tr>
-                                    <td colspan="2" style="text-align:center;">明細をうまく読み取れませんでした</td>
+                                    <td><?= htmlspecialchars($item['name']) ?></td>
+                                    <td class="price">¥<?= number_format($item['price']) ?></td>
+                                </tr>
+                            <?php endforeach; ?>
+                            <?php if (isset($result['total']) && $result['total']): ?>
+                                <tr class="total-row">
+                                    <td><strong>合計</strong></td>
+                                    <td class="price"><strong>¥<?= number_format($result['total']) ?></strong></td>
                                 </tr>
                             <?php endif; ?>
                         </tbody>
                     </table>
                 </div>
 
-                <div class="actions">
-                    <a href="?action=download" class="btn download-btn">CSV ダウンロード</a>
-                    <a href="ocr.log" class="btn log-btn" target="_blank">ログ確認 (検証用)</a>
+                <!-- ダウンロードボタン -->
+                <div class="download-buttons">
+                    <?php if ($csv_download_url): ?>
+                        <a href="<?= $csv_download_url ?>" download class="btn btn-success">
+                            📥 CSV ダウンロード
+                        </a>
+                    <?php endif; ?>
                 </div>
 
-                <details class="raw-text">
-                    <summary>認識された生テキストを表示</summary>
-                    <pre><?= htmlspecialchars($result['raw_text'] ?? '') ?></pre>
+                <!-- OCR生テキスト（折りたたみ） -->
+                <details class="raw-text-section">
+                    <summary>🔍 OCR生テキストを表示</summary>
+                    <pre><?= htmlspecialchars($result['raw_text']) ?></pre>
                 </details>
             </section>
         <?php endif; ?>
-    </div>
-</body>
 
+        <!-- ログ管理セクション -->
+        <section class="log-section">
+            <h2>📝 デバッグログ</h2>
+            <div class="log-buttons">
+                <a href="?show_logs=1" class="btn btn-secondary">
+                    👁️ ログ表示
+                </a>
+                <a href="<?= API_URL ?>/logs/ocr/download" download class="btn btn-secondary">
+                    💾 ログダウンロード
+                </a>
+            </div>
+
+            <?php if ($show_logs): ?>
+                <div class="log-viewer">
+                    <h3>OCR処理ログ</h3>
+                    <pre><?= htmlspecialchars($logs) ?></pre>
+                    <a href="?" class="btn btn-secondary">✖️ 閉じる</a>
+                </div>
+            <?php endif; ?>
+        </section>
+
+        <footer>
+            <p>Powered by Tesseract OCR + FastAPI + PHP</p>
+        </footer>
+    </div>
+
+    <script>
+        // ファイル名表示
+        document.getElementById('receipt_image').addEventListener('change', function(e) {
+            const fileName = e.target.files[0]?.name || 'ファイル未選択';
+            document.getElementById('fileName').textContent = fileName;
+        });
+
+        // フォーム送信時のローディング表示
+        document.getElementById('uploadForm').addEventListener('submit', function() {
+            const btn = this.querySelector('button[type="submit"]');
+            btn.textContent = '⏳ 処理中...';
+            btn.disabled = true;
+        });
+    </script>
+</body>
 </html>

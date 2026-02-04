@@ -20,10 +20,10 @@ def memory():
 
 @app.post("/ocr")
 def ocr():
-    if "file" not in request.files:
+    if "image" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
 
-    file = request.files["file"]
+    file = request.files["image"]
     img = Image.open(file.stream)
 
     # 画像リサイズ
@@ -48,7 +48,7 @@ def ocr():
 
     return jsonify({
         "raw_text": text,
-        "parsed": parsed
+        "parsed_data": parsed
     })
 
 if __name__ == "__main__":
